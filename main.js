@@ -41,8 +41,8 @@ const CONFIG = {
     { id: 'p3', coins: 15, price_label: '۳۵٬۰۰۰ تومان' },
   ],
   CARD_INFO: {
-    card_number: '6219 8619 4308 4037',
-    holder_name: 'امیرحسین سیاهبالائی',
+    card_number: '5892 1016 4867 5615',
+    holder_name: 'طاها مطمئن',
     pay_note: 'لطفاً پس از پرداخت، رسید را ارسال کنید.'
   },
   // OpenVPN settings
