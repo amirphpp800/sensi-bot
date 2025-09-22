@@ -733,6 +733,8 @@ async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
     const doneKey = CONFIG.REF_DONE_PREFIX + String(referredId);
     const done = await kvGet(env, doneKey);
     if (done) return false; // already credited once
+    // Ensure referrer user exists so crediting won't fail
+    try { await ensureUser(env, String(referrerId), {}); } catch {}
     const amount = 1; // grant 1 coin to referrer
     const credited = await creditBalance(env, String(referrerId), amount);
     if (!credited) return false;
