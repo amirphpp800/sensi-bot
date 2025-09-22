@@ -20,7 +20,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.4-optimized + Ai',
+  BOT_VERSION: '4.5-optimized + Ai',
   // Performance settings
   MAX_CACHE_SIZE: 1000,
   CACHE_TTL: 300000, // 5 minutes
