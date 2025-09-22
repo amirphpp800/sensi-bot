@@ -5209,7 +5209,7 @@ async function sendWelcome(chat_id, uid, env, msg) {
     const hdr = await mainMenuHeader(env);
     await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
-
+}
 function extractReferrerFromStartParam(msg) {
   try {
     const text = msg.text || msg.caption || '';
@@ -6346,5 +6346,5 @@ function renderStatusPage(settings, stats, envSummary = {}) {
 </body>
 </html>`;
 }
-// 11) Expose app via global (avoid ESM export for Wrangler)
+// 11) Expose app via global (for Wrangler/Pages)
 globalThis.APP = { fetch: routerFetch };
