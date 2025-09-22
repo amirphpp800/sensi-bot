@@ -3038,7 +3038,6 @@ async function onCallback(cb, env) {
     const joined = isAdm ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined && data !== 'join_check' && !data.startsWith('confirm_buy') && data !== 'cancel_buy') {
       await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
-      return;
     }
 
     if (data === 'join_check') {
@@ -3052,6 +3051,7 @@ async function onCallback(cb, env) {
             const credited = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
             if (credited) {
               try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید تایید شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+              try { const uu = await getUser(env, uid); if (uu) { uu.referral_pending = false; await setUser(env, uid, uu); } } catch {}
             }
           }
         } catch {}
