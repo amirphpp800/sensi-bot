@@ -1,5 +1,4 @@
- 
-/*
+ /*
   main.js — Cloudflare Pages Functions Worker for a Telegram bot
 
   Sections:
@@ -20,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.5-optimized + Ai',
+  BOT_VERSION: '4.6-optimized + Ai',
   // Performance settings
   MAX_CACHE_SIZE: 1000,
   CACHE_TTL: 300000, // 5 minutes
@@ -39,6 +38,7 @@ const CONFIG = {
   REF_PENDING_PREFIX: 'ref:pending:',
   PURCHASE_PREFIX: 'purchase:',
   BLOCK_PREFIX: 'blocked:',
+  ADMIN_PREFIX: 'admin:',
   // Tester users (always allowed to test referral multiple times)
   TESTER_IDS: ['6519017272'],
   // Custom purchasable buttons
@@ -1743,8 +1743,25 @@ function getKnownUserButtons() {
   ];
 }
 
-// تشخیص ادمین از روی متغیرهای محیطی
-function isAdminUser(env, uid) {
+// تشخیص ادمین از روی متغیرهای محیطی و تنظیمات ذخیره شده
+async function isAdminUser(env, uid) {
+  try {
+    // Check environment variables first (primary admins)
+    const single = (env?.ADMIN_ID || '').trim();
+    if (single && String(uid) === String(single)) return true;
+    const list = (env?.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length && list.includes(String(uid))) return true;
+    
+    // Check dynamic admin list from settings
+    const s = await getSettings(env);
+    const dynamicAdmins = Array.isArray(s?.bot_admins) ? s.bot_admins : [];
+    if (dynamicAdmins.includes(String(uid))) return true;
+  } catch {}
+  return false;
+}
+
+// Synchronous version for backward compatibility (checks only env vars)
+function isAdminUserSync(env, uid) {
   try {
     const single = (env?.ADMIN_ID || '').trim();
     if (single && String(uid) === String(single)) return true;
@@ -1754,7 +1771,27 @@ function isAdminUser(env, uid) {
   return false;
 }
 
-function getAdminChatIds(env) {
+async function getAdminChatIds(env) {
+  const ids = [];
+  try {
+    // Get env-based admins
+    const single = (env?.ADMIN_ID || '').trim();
+    if (single) ids.push(String(single));
+    const list = (env?.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const id of list) if (!ids.includes(String(id))) ids.push(String(id));
+    
+    // Get dynamic admins from settings
+    const s = await getSettings(env);
+    const dynamicAdmins = Array.isArray(s?.bot_admins) ? s.bot_admins : [];
+    for (const id of dynamicAdmins) {
+      if (!ids.includes(String(id))) ids.push(String(id));
+    }
+  } catch {}
+  return ids;
+}
+
+// Synchronous version for backward compatibility
+function getAdminChatIdsSync(env) {
   const ids = [];
   try {
     const single = (env?.ADMIN_ID || '').trim();
@@ -1765,14 +1802,14 @@ function getAdminChatIds(env) {
   return ids;
 }
 
-function mainMenuKb(env, uid) {
+async function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
     [ { text: '🛡 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
     [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '💰 بازارچه', callback_data: 'market' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
-  if (isAdminUser(env, uid)) {
+  if (await isAdminUser(env, uid)) {
     rows.push([ { text: '🛠 پنل ادمین', callback_data: 'admin' } ]);
   }
   return kb(rows);
@@ -1851,11 +1888,13 @@ function adminMenuKb(settings) {
     [ { text: '📣 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
-    // Row 7: Backup
+    // Row 7: Admin Management
+    [ { text: '👨‍💼 مدیریت ادمین‌ها', callback_data: 'adm_manage_admins' } ],
+    // Row 8: Backup
     [ { text: '🧰 بکاپ دیتابیس', callback_data: 'adm_backup' } ],
-    // Row 7: Help + Broadcast in same row
+    // Row 9: Help + Broadcast in same row
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
-    // Row: Block/Unblock User with emojis (Unblock on left, Block on right)
+    // Row 10: Block/Unblock User with emojis (Unblock on left, Block on right)
     [ { text: 'انبلاک 📛', callback_data: 'adm_unblock' }, { text: 'بلاک ⛔️', callback_data: 'adm_block' } ],
     // Marketplace management
     [ { text: '🛒 مدیریت بازارچه', callback_data: 'adm_cbtn' } ],
@@ -2069,27 +2108,31 @@ async function onMessage(msg, env) {
     const uid = String(from.id);
     await ensureUser(env, uid, from);
 
-    // Blocked user check
-    try {
-      const blocked = await isUserBlocked(env, uid);
-      if (blocked) {
-        const s = await getSettings(env);
-        const url = s?.support_url || 'https://t.me/NeoDebug';
-        const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
-        await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
-        return;
-      }
-      // (moved WG filename handler below)
-    } catch {}
+    // Blocked user check (skip for admins)
+    const isAdmin = await isAdminUser(env, uid);
+    if (!isAdmin) {
+      try {
+        const blocked = await isUserBlocked(env, uid);
+        if (blocked) {
+          const s = await getSettings(env);
+          const url = s?.support_url || 'https://t.me/NeoDebug';
+          const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
+          await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
+          return;
+        }
+      } catch {}
+    }
 
     // If update mode is on, block non-admin users globally
-    try {
-      const s = await getSettings(env);
-      if (s?.update_mode === true && !isAdminUser(env, uid)) {
-        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.', kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
-        return;
-      }
-    } catch {}
+    if (!isAdmin) {
+      try {
+        const s = await getSettings(env);
+        if (s?.update_mode === true) {
+          await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.', kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
+          return;
+        }
+      } catch {}
+    }
 
     // دستورات متنی
     const text = msg.text || msg.caption || '';
@@ -2097,8 +2140,7 @@ async function onMessage(msg, env) {
     const st = await getUserState(env, uid);
 
     // Mandatory join check (bypass for admins and during WG admin edit step)
-    const isAdmMsg = isAdminUser(env, uid) || (st?.step === 'adm_wg_edit');
-    const joined = isAdmMsg ? true : await ensureJoinedChannels(env, uid, chat_id);
+    const joined = isAdmin ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined) return; // A join prompt has been shown
     // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
     if (st?.step === 'ps_wg_name' && (typeof st?.ep_idx === 'number' || st?.country)) {
@@ -2191,7 +2233,7 @@ async function onMessage(msg, env) {
     }
     // Admin: /who <user_id>
     if (text.startsWith('/who')) {
-      if (!isAdminUser(env, uid)) { await tgSendMessage(env, chat_id, 'این دستور فقط برای مدیران است.'); return; }
+      if (!await isAdminUser(env, uid)) { await tgSendMessage(env, chat_id, 'این دستور فقط برای مدیران است.'); return; }
       const parts = text.trim().split(/\s+/);
       const target = parts[1];
       if (!target || !/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'کاربرد: /who <user_id>'); return; }
@@ -2205,7 +2247,7 @@ async function onMessage(msg, env) {
     }
     if (text.startsWith('/update')) {
       await clearUserState(env, uid);
-      await tgSendMessage(env, chat_id, await mainMenuHeader(env), mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, await mainMenuHeader(env), await mainMenuKb(env, uid));
       return;
     }
 
@@ -2231,7 +2273,7 @@ async function onMessage(msg, env) {
         };
         p.admin_msgs = [];
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
-        const admins = getAdminChatIds(env);
+        const admins = await getAdminChatIds(env);
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
         for (const aid of admins) {
           const res = await tgSendPhoto(env, aid, largest.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
@@ -2261,7 +2303,7 @@ async function onMessage(msg, env) {
         };
         p.admin_msgs = [];
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
-        const admins = getAdminChatIds(env);
+        const admins = await getAdminChatIds(env);
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
         for (const aid of admins) {
           const res = await tgSendDocument(env, aid, msg.document.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
@@ -2293,7 +2335,7 @@ async function onMessage(msg, env) {
       // اگر ادمین در فلو آپلود است (پشتیبانی از فایل‌های مختلف)
       const st = await getUserState(env, uid);
       // Admin: OpenVPN upload flow (expects .ovpn as Document)
-      if (isAdminUser(env, uid) && st?.step === 'adm_ovpn_wait_file') {
+      if (await isAdminUser(env, uid) && st?.step === 'adm_ovpn_wait_file') {
         if (msg.document && msg.document.file_id) {
           const proto = String((st.proto || '')).toUpperCase();
           const loc = String(st.loc || '');
@@ -2371,7 +2413,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, 'لطفاً فایل .ovpn را به صورت سند (Document) ارسال کنید.');
         return;
       }
-      if (isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
+      if (await isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
         let tmp = null;
         if (msg.document) {
           tmp = {
@@ -2395,7 +2437,7 @@ async function onMessage(msg, env) {
         return;
       }
       // Admin: Replace content — handle media replacement
-      if (isAdminUser(env, uid) && st?.step === 'adm_cbtn_replace_wait' && st?.id) {
+      if (await isAdminUser(env, uid) && st?.step === 'adm_cbtn_replace_wait' && st?.id) {
         let tmp = null;
         if (msg.document) {
           tmp = { kind: 'document', file_id: msg.document.file_id, file_name: msg.document.file_name || 'file', file_size: msg.document.file_size || 0, mime_type: msg.document.mime_type || 'application/octet-stream' };
@@ -2419,7 +2461,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '✅ محتوا جایگزین شد.', mainMenuInlineKb());
         return;
       }
-      if (isAdminUser(env, uid) && st?.step === 'adm_cbtn_wait_file') {
+      if (await isAdminUser(env, uid) && st?.step === 'adm_cbtn_wait_file') {
         let tmp = null;
         if (msg.document) {
           tmp = {
@@ -2444,7 +2486,7 @@ async function onMessage(msg, env) {
       }
 
       // در حالت عادی (آپلود کاربر عادی با Document و ...)
-      if (msg.document && !isAdminUser(env, uid)) {
+      if (msg.document && !await isAdminUser(env, uid)) {
         const token = newToken(6);
         const meta = {
           token,
@@ -2473,7 +2515,7 @@ async function onMessage(msg, env) {
     if (text) {
       // Handle stateful flows for giftcode/redeem
       const state = await getUserState(env, uid);
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_wait_file') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_wait_file') {
         // Admin provided text content for custom button
         const tmp = { kind: 'text', text: String(text || '') };
         await setUserState(env, uid, { step: 'adm_cbtn_title', tmp });
@@ -2481,7 +2523,7 @@ async function onMessage(msg, env) {
         return;
       }
       // Admin upload flow (generic): allow plain text/link as a content type
-      if (isAdminUser(env, uid) && state?.step === 'adm_upload_wait_file') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_upload_wait_file') {
         const tmp = { kind: 'text', text: String(text || '') };
         await setUserState(env, uid, { step: 'adm_upload_price', tmp });
         await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
@@ -2517,7 +2559,7 @@ async function onMessage(msg, env) {
         await clearUserState(env, uid);
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_upload_price') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_upload_price') {
         const amount = Number(text.replace(/[^0-9]/g, ''));
         const tmp = state.tmp || {};
         // Accept media (with file_id) or plain text (kind === 'text')
@@ -2527,14 +2569,14 @@ async function onMessage(msg, env) {
         return;
       }
       // Admin: Custom Button — after receiving media/text, ask for title
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_title') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_title') {
         const title = String(text || '').trim();
         if (!title) { await tgSendMessage(env, chat_id, '❌ عنوان نامعتبر است. دوباره ارسال کنید:'); return; }
         await setUserState(env, uid, { step: 'adm_cbtn_price', tmp: state.tmp, title });
         await tgSendMessage(env, chat_id, '💰 قیمت به سکه برای این دکمه را ارسال کنید (مثلاً 5):');
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_price') {
         const price = Number(text.replace(/[^0-9]/g, ''));
         const tmp = state.tmp || {};
         const title = String(state.title || '').trim();
@@ -2543,7 +2585,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '👥 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (برای بدون محدودیت 0 بفرستید):');
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit') {
         const maxUsersVal = parseNonNegativeInt(text);
         if (!Number.isFinite(maxUsersVal)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
         const tmp = state.tmp || {};
@@ -2578,7 +2620,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, `✅ دکمه افزوده شد: <b>${htmlEscape(title)}</b> — قیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${fmtNum(meta.max_users)}</b>`, mainMenuInlineKb());
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
         const id = state.id;
         const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
         const price = Number(text.replace(/[^0-9]/g, ''));
@@ -2588,7 +2630,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '✅ قیمت بروزرسانی شد.', mainMenuInlineKb());
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit_change' && state?.id) {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit_change' && state?.id) {
         const id = state.id;
         const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
         const maxUsersVal = parseNonNegativeInt(text);
@@ -2598,7 +2640,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '✅ محدودیت بروزرسانی شد.', mainMenuInlineKb());
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_replace_wait' && state?.id) {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_cbtn_replace_wait' && state?.id) {
         const id = state.id;
         let tmp = null;
         if (msg && msg.document) {
@@ -2631,7 +2673,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '✅ محتوا جایگزین شد.', mainMenuInlineKb());
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_upload_limit') {
+      if (await isAdminUser(env, uid) && state?.step === 'adm_upload_limit') {
         const maxUsers = parseNonNegativeInt(text);
         if (!Number.isFinite(maxUsers)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
         const tmp = state.tmp || {};
@@ -2661,7 +2703,7 @@ async function onMessage(msg, env) {
         return;
       }
       // Admin flows
-      if (isAdminUser(env, uid)) {
+      if (await isAdminUser(env, uid)) {
         // Admin: change support URL/ID
         if (state?.step === 'adm_support_url') {
           let val = String(text || '').trim();
@@ -2975,6 +3017,43 @@ async function onMessage(msg, env) {
           await clearUserState(env, uid);
           return;
         }
+        
+        // Admin: Add new admin
+        if (state?.step === 'adm_add_admin_uid') {
+          const target = text.trim();
+          if (!/^\d+$/.test(target)) { 
+            await tgSendMessage(env, chat_id, 'آیدی نامعتبر است. یک عدد ارسال کنید.'); 
+            return; 
+          }
+          
+          // Check if already admin
+          const isAlreadyAdmin = await isAdminUser(env, target);
+          if (isAlreadyAdmin) {
+            await tgSendMessage(env, chat_id, '⚠️ این کاربر از قبل ادمین است.');
+            await clearUserState(env, uid);
+            return;
+          }
+          
+          // Add to dynamic admins list
+          const s = await getSettings(env);
+          s.bot_admins = Array.isArray(s.bot_admins) ? s.bot_admins : [];
+          if (!s.bot_admins.includes(String(target))) {
+            s.bot_admins.push(String(target));
+            await setSettings(env, s);
+            await tgSendMessage(env, chat_id, `✅ کاربر <code>${target}</code> به عنوان ادمین اضافه شد.`);
+            
+            // Notify new admin
+            try {
+              await tgSendMessage(env, target, '🎉 شما به عنوان ادمین ربات اضافه شدید!\n\nبرای دسترسی به پنل مدیریت از دستور /start استفاده کنید.');
+            } catch {}
+          } else {
+            await tgSendMessage(env, chat_id, '⚠️ این کاربر از قبل در لیست ادمین‌ها وجود دارد.');
+          }
+          
+          await clearUserState(env, uid);
+          return;
+        }
+        
         // Admin: پاسخ به تیکت
         if (state?.step === 'adm_ticket_reply' && state?.ticket_id && state?.target_uid) {
           const replyText = (text || '').trim();
@@ -2999,7 +3078,7 @@ async function onMessage(msg, env) {
             await tgSendMessage(env, chat_id, `🎟 تیکت شما با شناسه ${t.id} ثبت شد. پشتیبانی به‌زودی پاسخ خواهد داد.`);
             // notify admins
             try {
-              const admins = getAdminChatIds(env);
+              const admins = await getAdminChatIds(env);
               for (const aid of admins) {
                 await tgSendMessage(env, aid, `🎟 تیکت جدید #${t.id}\nاز: <code>${uid}</code>\nمتن: ${htmlEscape(content)}`);
               }
@@ -3012,7 +3091,7 @@ async function onMessage(msg, env) {
         }
         // Admin: ایجاد کد هدیه — مرحله 1: مبلغ
         if (state?.step === 'adm_gift_create_amount') {
-          if (!isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
+          if (!await isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
           const amount = Number((text||'').replace(/[^0-9]/g,''));
           if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است. یک عدد مثبت بفرستید.'); return; }
           await setUserState(env, uid, { step: 'adm_gift_create_uses', amount });
@@ -3021,7 +3100,7 @@ async function onMessage(msg, env) {
         }
         // Admin: ایجاد کد هدیه — مرحله 2: سقف استفاده و ساخت کد
         if (state?.step === 'adm_gift_create_uses' && typeof state.amount === 'number') {
-          if (!isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
+          if (!await isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
           const uses = Number((text||'').replace(/[^0-9]/g,''));
           if (!uses || uses <= 0) { await tgSendMessage(env, chat_id, 'تعداد نامعتبر است.'); return; }
           // generate unique code
@@ -3136,7 +3215,7 @@ async function onMessage(msg, env) {
           return;
         }
       }
-      await tgSendMessage(env, chat_id, 'لطفاً از منو استفاده کنید:', mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, 'لطفاً از منو استفاده کنید:', await mainMenuKb(env, uid));
     }
   } catch (e) {
     console.error('onMessage error', e);
@@ -3154,44 +3233,50 @@ async function onCallback(cb, env) {
     // Ensure user profile exists for balance operations
     try { await ensureUser(env, uid, from); } catch {}
 
-    // Blocked user check
-    try {
-      const blocked = await isUserBlocked(env, uid);
-      if (blocked) {
-        const s = await getSettings(env);
-        const url = s?.support_url || 'https://t.me/NeoDebug';
-        const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
-        await tgAnswerCallbackQuery(env, cb.id, 'مسدود هستید');
-        await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
-        return;
-      }
-    } catch {}
+    // Blocked user check (skip for admins)
+    const isAdminCb = await isAdminUser(env, uid);
+    if (!isAdminCb) {
+      try {
+        const blocked = await isUserBlocked(env, uid);
+        if (blocked) {
+          const s = await getSettings(env);
+          const url = s?.support_url || 'https://t.me/NeoDebug';
+          const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
+          await tgAnswerCallbackQuery(env, cb.id, 'مسدود هستید');
+          await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
+          return;
+        }
+      } catch {}
+    }
 
     // Update mode: block non-admin users from using buttons
-    try {
-      const s = await getSettings(env);
-      if (s?.update_mode === true && !isAdminUser(env, uid)) {
-        await tgAnswerCallbackQuery(env, cb.id, '🛠️ در حال بروزرسانی');
-        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.');
-        return;
-      }
-    } catch {}
+    if (!isAdminCb) {
+      try {
+        const s = await getSettings(env);
+        if (s?.update_mode === true) {
+          await tgAnswerCallbackQuery(env, cb.id, '🛠️ در حال بروزرسانی');
+          await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.');
+          return;
+        }
+      } catch {}
+    }
 
     // اگر برخی دکمه‌ها به صورت مجزا غیرفعال شده‌اند و کاربر ادمین نیست
-    try {
-      const s = await getSettings(env);
-      const disabled = Array.isArray(s?.disabled_buttons) ? s.disabled_buttons : [];
-      const wh = ['join_check', 'back_main', 'adm_service', 'adm_buttons', 'adm_buttons_add', 'adm_buttons_clear'];
-      if (!isAdminUser(env, uid) && disabled.includes(data) && !wh.includes(data)) {
-        await tgAnswerCallbackQuery(env, cb.id, 'غیرفعال است');
-        await tgSendMessage(env, chat_id, s.disabled_message || '🔧 این دکمه موقتاً غیرفعال است.');
-        return;
-      }
-    } catch {}
+    if (!isAdminCb) {
+      try {
+        const s = await getSettings(env);
+        const disabled = Array.isArray(s?.disabled_buttons) ? s.disabled_buttons : [];
+        const wh = ['join_check', 'back_main', 'adm_service', 'adm_buttons', 'adm_buttons_add', 'adm_buttons_clear'];
+        if (disabled.includes(data) && !wh.includes(data)) {
+          await tgAnswerCallbackQuery(env, cb.id, 'غیرفعال است');
+          await tgSendMessage(env, chat_id, s.disabled_message || '🔧 این دکمه موقتاً غیرفعال است.');
+          return;
+        }
+      } catch {}
+    }
 
     // Mandatory join check (ادمین‌ها مستثنی هستند؛ همچنین تایید/لغو خرید)
-    const isAdm = isAdminUser(env, uid);
-    const joined = isAdm ? true : await ensureJoinedChannels(env, uid, chat_id);
+    const joined = isAdminCb ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined && data !== 'join_check' && !data.startsWith('confirm_buy') && data !== 'cancel_buy') {
       await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
       return;
@@ -3235,7 +3320,8 @@ async function onCallback(cb, env) {
           }
         } catch (e) { console.log(`[DEBUG] join_check error:`, e); }
         const hdr = await mainMenuHeader(env);
-        await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.\n${hdr}`, mainMenuKb(env, uid));
+        await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.
+${hdr}`, await mainMenuKb(env, uid));
       } else {
         // در صورت عدم تایید، مجدداً راهنمای عضویت را نمایش بده
         await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
@@ -3247,7 +3333,7 @@ async function onCallback(cb, env) {
     if (data === 'back_main') {
       if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
       const hdr = await mainMenuHeader(env);
-      await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
+      await tgEditMessage(env, chat_id, mid, hdr, await mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -3256,7 +3342,7 @@ async function onCallback(cb, env) {
     if (data === 'back_main_new') {
       if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
       const hdr = await mainMenuHeader(env);
-      await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, hdr, await mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -4026,19 +4112,102 @@ ${flag} <b>${country}</b>
     if (data === 'update') {
       await clearUserState(env, uid);
       const hdr = await mainMenuHeader(env);
-      await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
+      await tgEditMessage(env, chat_id, mid, hdr, await mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
     // پنل ادمین (اگر ادمین باشد)
-    if (isAdminUser(env, uid)) {
+    if (await isAdminUser(env, uid)) {
       if (data === 'admin') {
         const settings = await getSettings(env);
         await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
+      
+      // Admin Management
+      if (data === 'adm_manage_admins') {
+        const s = await getSettings(env);
+        const admins = Array.isArray(s?.bot_admins) ? s.bot_admins : [];
+        const envAdmins = getAdminChatIdsSync(env);
+        const rows = [];
+        
+        // Show dynamic admins
+        if (admins.length > 0) {
+          rows.push([{ text: '📋 ادمین‌های قابل حذف:', callback_data: 'noop' }]);
+          for (const aid of admins) {
+            rows.push([{ text: `🗑 ${aid}`, callback_data: `adm_remove_admin:${aid}` }]);
+          }
+        }
+        
+        // Show env admins (read-only)
+        if (envAdmins.length > 0) {
+          rows.push([{ text: '🔒 ادمین‌های ثابت (از متغیر محیطی):', callback_data: 'noop' }]);
+          for (const aid of envAdmins) {
+            rows.push([{ text: `✅ ${aid}`, callback_data: 'noop' }]);
+          }
+        }
+        
+        rows.push([{ text: '➕ افزودن ادمین', callback_data: 'adm_add_admin' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        
+        await tgEditMessage(env, chat_id, mid, '👨‍💼 مدیریت ادمین‌ها\n\nادمین‌های ثابت از متغیرهای محیطی خوانده می‌شوند و قابل حذف نیستند.', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      
+      if (data === 'adm_add_admin') {
+        await setUserState(env, uid, { step: 'adm_add_admin_uid' });
+        await tgSendMessage(env, chat_id, 'آیدی عددی کاربری که می‌خواهید ادمین کنید را ارسال کنید:');
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      
+      if (data.startsWith('adm_remove_admin:')) {
+        const targetUid = data.split(':')[1];
+        const s = await getSettings(env);
+        const admins = Array.isArray(s?.bot_admins) ? s.bot_admins : [];
+        const idx = admins.indexOf(String(targetUid));
+        if (idx !== -1) {
+          admins.splice(idx, 1);
+          s.bot_admins = admins;
+          await setSettings(env, s);
+          await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+          
+          // Refresh list
+          const envAdmins = getAdminChatIdsSync(env);
+          const rows = [];
+          
+          if (admins.length > 0) {
+            rows.push([{ text: '📋 ادمین‌های قابل حذف:', callback_data: 'noop' }]);
+            for (const aid of admins) {
+              rows.push([{ text: `🗑 ${aid}`, callback_data: `adm_remove_admin:${aid}` }]);
+            }
+          }
+          
+          if (envAdmins.length > 0) {
+            rows.push([{ text: '🔒 ادمین‌های ثابت (از متغیر محیطی):', callback_data: 'noop' }]);
+            for (const aid of envAdmins) {
+              rows.push([{ text: `✅ ${aid}`, callback_data: 'noop' }]);
+            }
+          }
+          
+          rows.push([{ text: '➕ افزودن ادمین', callback_data: 'adm_add_admin' }]);
+          rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+          
+          await tgEditMessage(env, chat_id, mid, '👨‍💼 مدیریت ادمین‌ها\n\nادمین‌های ثابت از متغیرهای محیطی خوانده می‌شوند و قابل حذف نیستند.', kb(rows));
+          
+          // Notify removed admin
+          try {
+            await tgSendMessage(env, targetUid, '⚠️ دسترسی ادمین شما توسط مدیر اصلی حذف شد.');
+          } catch {}
+        } else {
+          await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد');
+        }
+        return;
+      }
+      
       // Admin: Custom buttons management
       if (data === 'adm_cbtn') {
         const s = await getSettings(env);
@@ -5350,7 +5519,7 @@ async function sendWelcome(chat_id, uid, env, msg) {
       return;
     }
     const hdr = await mainMenuHeader(env);
-    await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
+    await tgSendMessage(env, chat_id, hdr, await mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
 }
 function extractReferrerFromStartParam(msg) {
@@ -5998,6 +6167,7 @@ async function getSettings(env) {
       card_info: CONFIG.CARD_INFO,
       support_url: 'https://t.me/NeoDebug',
       bot_version: CONFIG.BOT_VERSION,
+      bot_admins: [],
       wg_defaults: {
         address: '10.66.66.2/32',
         dns: '10.202.10.10, 10.202.10.11',
